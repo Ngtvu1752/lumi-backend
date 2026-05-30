@@ -8,7 +8,7 @@ class SleepSessionCreate(BaseModel):
     start_time: datetime
     end_time: datetime
     duration_mins: int
-    session_type: str  # "nightly" or "nap"
+    session_type: str | None = None  # "nightly" or "nap" — auto-classified if omitted
 
 
 class SleepSessionResponse(BaseModel):

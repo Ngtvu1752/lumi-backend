@@ -1,80 +1,75 @@
 import uuid
-from datetime import datetime, timezone
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.biometric import BiometricData
-from app.models.sleep_session import SleepSession
-from app.schemas.sleep import HealthConnectSyncRequest
+from app.schemas.sleep import HealthConnectSyncRequest, SleepSessionCreate
+from app.tasks.storage import insert_biometric_data, insert_sleep_sessions
 
 
 async def ingest_health_connect_data(
-    db: AsyncSession,
     user_id: uuid.UUID,
     payload: HealthConnectSyncRequest,
 ) -> dict:
-    """Ingest data from Android Health Connect sync.
+    """Dispatch Health Connect data to Celery storage workers.
 
-    Handles sanitization: removes micro-awakenings, deduplicates overlapping
-    sessions from multiple devices, and classifies nightly vs nap sessions.
+    Sanitizes sleep sessions, serializes all records to dicts for JSON
+    transport, and dispatches to the storage queue. Returns immediately
+    without waiting for DB insert — the Celery worker handles persistence.
     """
-    inserted_sessions = 0
-    inserted_biometrics = 0
+    user_id_str = str(user_id)
 
+    # Sanitize and serialize sleep sessions
+    sessions = []
     for session in payload.sleep_sessions:
         sanitized = _sanitize_sleep_session(session)
         if sanitized is None:
             continue
+        sessions.append({
+            "start_time": sanitized.start_time.isoformat(),
+            "end_time": sanitized.end_time.isoformat(),
+            "duration_mins": sanitized.duration_mins,
+            "session_type": sanitized.session_type,
+        })
 
-        db_session = SleepSession(
-            user_id=user_id,
-            start_time=sanitized.start_time,
-            end_time=sanitized.end_time,
-            duration_mins=sanitized.duration_mins,
-            session_type=sanitized.session_type,
-        )
-        db.add(db_session)
-        inserted_sessions += 1
-
+    # Serialize biometric records
+    biometric_records = []
     if payload.heart_rate_records:
         for record in payload.heart_rate_records:
-            db.add(BiometricData(
-                user_id=str(user_id),
-                time=datetime.fromisoformat(record["time"]),
-                metric_type="heart_rate_bpm",
-                value=float(record["value"]),
-            ))
-            inserted_biometrics += 1
+            biometric_records.append({
+                "user_id": user_id_str,
+                "time": record["time"],
+                "metric_type": "heart_rate_bpm",
+                "value": float(record["value"]),
+            })
 
     if payload.steps_records:
         for record in payload.steps_records:
-            db.add(BiometricData(
-                user_id=str(user_id),
-                time=datetime.fromisoformat(record["time"]),
-                metric_type="steps",
-                value=float(record["value"]),
-            ))
-            inserted_biometrics += 1
+            biometric_records.append({
+                "user_id": user_id_str,
+                "time": record["time"],
+                "metric_type": "steps",
+                "value": float(record["value"]),
+            })
 
-    await db.flush()
+    # Dispatch to Celery storage queue
+    if sessions:
+        insert_sleep_sessions.delay(user_id_str, sessions)
+
+    if biometric_records:
+        insert_biometric_data.delay(biometric_records)
 
     return {
-        "sessions_inserted": inserted_sessions,
-        "biometrics_inserted": inserted_biometrics,
+        "sessions_dispatched": len(sessions),
+        "biometrics_dispatched": len(biometric_records),
     }
 
 
-def _sanitize_sleep_session(session):
+def _sanitize_sleep_session(session: SleepSessionCreate):
     """Remove micro-awakenings (< 5 min) and classify session type."""
     if session.duration_mins < 5:
         return None  # Too short — likely noise
 
-    # Classify: sleep between 10 AM - 6 PM is a nap
-    start_hour = session.start_time.hour
-    if 10 <= start_hour < 18:
-        session.session_type = "nap"
-    else:
-        session.session_type = "nightly"
+    # Auto-classify only if caller did not specify session_type
+    if session.session_type is None:
+        start_hour = session.start_time.hour
+        session.session_type = "nap" if 10 <= start_hour < 18 else "nightly"
 
     return session

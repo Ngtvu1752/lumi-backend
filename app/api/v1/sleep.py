@@ -8,10 +8,10 @@ from app.api.deps import get_current_user_id
 from app.db.session import get_db
 from app.models.sleep_session import SleepSession
 from app.models.user import User
-from app.schemas.sleep import HealthConnectSyncRequest, SleepDebtResponse, SleepSessionResponse
+from app.schemas.sleep import HealthConnectSyncRequest, SleepDebtResponse, SleepSessionCreate, SleepSessionResponse
 from app.services.etl import ingest_health_connect_data
+from app.tasks.storage import insert_sleep_sessions
 from app.algorithms.sleep_debt import compute_sleep_debt, format_sleep_debt
-from app.tasks.analytics import recalculate_energy
 
 router = APIRouter(prefix="/sleep", tags=["sleep"])
 
@@ -20,15 +20,48 @@ router = APIRouter(prefix="/sleep", tags=["sleep"])
 async def sync_health_connect(
     payload: HealthConnectSyncRequest,
     user_id: uuid.UUID = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
 ):
-    """Ingest sleep data from Android Health Connect."""
-    result = await ingest_health_connect_data(db, user_id, payload)
+    """Ingest sleep data from Android Health Connect.
 
-    # Trigger async energy recalculation
-    recalculate_energy.delay(str(user_id))
-
+    Dispatches data to Celery storage workers for async DB insert.
+    Returns immediately — does not block on persistence.
+    Energy recalculation is chained automatically after storage completes.
+    """
+    result = await ingest_health_connect_data(user_id, payload)
     return result
+
+
+@router.post("/manual", response_model=dict)
+async def manual_sleep_input(
+    payload: SleepSessionCreate,
+    user_id: uuid.UUID = Depends(get_current_user_id),
+):
+    """Manual sleep entry for users who decline Health Connect permission.
+
+    Accepts a single sleep session. Sessions shorter than 5 minutes are
+    rejected. Session type is auto-classified (nightly/nap) if not provided.
+    Dispatches to Celery storage worker — returns immediately.
+    """
+    # Reject micro-awakenings / noise
+    if payload.duration_mins < 5:
+        return {"error": "Session too short (minimum 5 minutes)", "sessions_dispatched": 0}
+
+    # Auto-classify if user did not specify
+    session_type = payload.session_type
+    if session_type is None:
+        start_hour = payload.start_time.hour
+        session_type = "nap" if 10 <= start_hour < 18 else "nightly"
+
+    session_dict = {
+        "start_time": payload.start_time.isoformat(),
+        "end_time": payload.end_time.isoformat(),
+        "duration_mins": payload.duration_mins,
+        "session_type": session_type,
+    }
+
+    insert_sleep_sessions.delay(str(user_id), [session_dict])
+
+    return {"sessions_dispatched": 1, "session_type": session_type}
 
 
 @router.get("/sessions", response_model=list[SleepSessionResponse])

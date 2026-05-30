@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from app.api.v1 import auth, energy, sleep, survey
+from app.api.v1 import auth, energy, sleep, survey, users
 from app.cache.energy_cache import get_redis
 from app.core.config import settings
 from app.db.session import engine
@@ -34,6 +34,7 @@ app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
 app.include_router(sleep.router, prefix=settings.API_V1_PREFIX)
 app.include_router(energy.router, prefix=settings.API_V1_PREFIX)
 app.include_router(survey.router, prefix=settings.API_V1_PREFIX)
+app.include_router(users.router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/health")

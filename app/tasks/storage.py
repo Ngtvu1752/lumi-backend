@@ -1,6 +1,5 @@
 import asyncio
-
-from sqlalchemy import select
+from datetime import datetime
 
 from app.db.session import async_session_factory
 from app.models.biometric import BiometricData
@@ -13,21 +12,27 @@ def insert_sleep_sessions(user_id: str, sessions: list[dict]):
     """Batch INSERT sleep sessions into TimescaleDB hypertable.
 
     Runs as a dedicated storage worker to avoid blocking the API.
+    After successful insert, chains recalculate_energy on the analytics queue.
     """
     asyncio.run(_insert_sessions_async(user_id, sessions))
 
 
 async def _insert_sessions_async(user_id: str, sessions: list[dict]):
+    from app.tasks.analytics import recalculate_energy
+
     async with async_session_factory() as db:
         for s in sessions:
             db.add(SleepSession(
                 user_id=user_id,
-                start_time=s["start_time"],
-                end_time=s["end_time"],
+                start_time=datetime.fromisoformat(s["start_time"]),
+                end_time=datetime.fromisoformat(s["end_time"]),
                 duration_mins=s["duration_mins"],
                 session_type=s["session_type"],
             ))
         await db.commit()
+
+    # Chain analytics: recalculate energy after storage completes
+    recalculate_energy.delay(user_id)
 
 
 @celery_app.task(name="tasks.storage.insert_biometric_data", queue="storage")
@@ -47,9 +52,9 @@ async def _insert_biometrics_async(records: list[dict]):
             for r in chunk:
                 db.add(BiometricData(
                     user_id=r["user_id"],
-                    time=r["time"],
+                    time=datetime.fromisoformat(r["time"]),
                     metric_type=r["metric_type"],
                     value=r["value"],
-            ))
+                ))
             await db.flush()
         await db.commit()
