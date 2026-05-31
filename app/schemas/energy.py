@@ -18,7 +18,8 @@ class EnergyZone(BaseModel):
 class NudgeEvent(BaseModel):
     time: datetime
     message: str
-    nudge_type: str  # "light_exposure", "nap", "caffeine_cutoff", "wind_down", "melatonin_window"
+    nudge_type: str  # light_exposure, hydration, exercise, deep_work, caffeine, caffeine_cutoff,
+    # meal_timing, nap, task_suggestion, blue_light, wind_down
 
 
 class EnergyScheduleResponse(BaseModel):

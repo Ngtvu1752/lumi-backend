@@ -63,8 +63,8 @@ def compute_energy_schedule(
     # Normalize to [0, 100] scale
     energy_normalized = _normalize_energy(energy)
 
-    # Classify zones
-    zones = _classify_zones(energy_normalized, t_hours)
+    # Classify zones — pass C(k) for dynamic melatonin window
+    zones = _classify_zones(energy_normalized, t_hours, c)
 
     # Generate nudges
     nudges = _generate_nudges(zones, wake_time)
@@ -85,8 +85,18 @@ def _normalize_energy(energy: np.ndarray) -> np.ndarray:
     return (energy - min_val) / (max_val - min_val) * 100.0
 
 
-def _classify_zones(energy: np.ndarray, t_hours: np.ndarray) -> list[EnergyZone]:
-    """Classify time periods into physiological zones based on energy curve."""
+def _classify_zones(
+    energy: np.ndarray,
+    t_hours: np.ndarray,
+    c_values: np.ndarray,
+) -> list[EnergyZone]:
+    """Classify time periods into physiological zones based on energy curve.
+
+    Args:
+        energy: normalized energy values [0-100]
+        t_hours: time points in hours
+        c_values: Process C circadian signal (used for melatonin window)
+    """
     zones = []
 
     # Find local maxima and minima
@@ -120,10 +130,50 @@ def _classify_zones(energy: np.ndarray, t_hours: np.ndarray) -> list[EnergyZone]
         end = min(len(energy), best + 30)
         zones.append(EnergyZone("evening_peak", start, end))
 
-    # Melatonin window: 2-3h before end of day
-    zones.append(EnergyZone("melatonin_window", 1260, 1380))
+    # Melatonin window (DLMO): dynamically computed from circadian phase
+    melatonin_start, melatonin_end = _compute_melatonin_window(c_values, t_hours)
+    zones.append(EnergyZone("melatonin_window", melatonin_start, melatonin_end))
 
     return zones
+
+
+def _compute_melatonin_window(
+    c_values: np.ndarray,
+    t_hours: np.ndarray,
+) -> tuple[int, int]:
+    """Compute melatonin window from Process C circadian signal.
+
+    DLMO (Dim Light Melatonin Onset) occurs when the circadian drive
+    begins declining in the evening, typically 2-3h before habitual sleep onset.
+
+    Strategy: find the nadir (minimum) of C(k) — this corresponds to the
+    core body temperature minimum, which occurs ~2h before habitual wake time.
+    The melatonin window opens ~5h before the nadir and closes ~3h before.
+
+    For a typical Early Bird (nadir ~3 AM):  window ~10 PM–12 AM
+    For a typical Night Owl  (nadir ~5 AM):  window ~12 AM–2 AM
+    """
+    # Find the nadir (minimum) of C(k) across the full 24h cycle
+    nadir_idx = int(np.argmin(c_values))
+    nadir_hour = t_hours[nadir_idx]
+
+    # Convert to 1-indexed minute count for zone boundaries
+    nadir_minute = int(nadir_hour * 60)
+
+    # Melatonin window: opens 5h before nadir (DLMO), closes 3h before nadir
+    # This gives a ~2h window centered around DLMO
+    start_minute = nadir_minute - 300  # 5 hours before nadir
+    end_minute = nadir_minute - 180    # 3 hours before nadir
+
+    # Wrap around if before midnight (e.g., nadir at 3 AM → start at 22:00)
+    # For zones, we keep minutes relative to wake time (0-1440 range)
+    # If the window falls before midnight (negative), shift into valid range
+    if start_minute < 0:
+        start_minute += 1440
+    if end_minute < 0:
+        end_minute += 1440
+
+    return start_minute, end_minute
 
 
 def _find_peaks(data: np.ndarray) -> list[int]:
@@ -136,26 +186,152 @@ def _find_peaks(data: np.ndarray) -> list[int]:
 
 
 def _generate_nudges(zones: list[EnergyZone], wake_time: datetime) -> list[NudgeEvent]:
-    """Generate nudge events based on classified zones."""
+    """Generate science-based nudge events mapped to circadian phases.
+
+    16 nudges derived from sleep science research, each timed to the
+    user's personalized energy zones rather than fixed clock times.
+    """
     nudges = []
-    for zone in zones:
-        start_time = wake_time + timedelta(minutes=zone.start_minute)
-        if zone.zone_type == "wake":
+
+    # Index zones by type for quick lookup
+    zone_map = {z.zone_type: z for z in zones}
+
+    wake_zone = zone_map.get("wake")
+    morning_peak = zone_map.get("morning_peak")
+    afternoon_dip = zone_map.get("afternoon_dip")
+    evening_peak = zone_map.get("evening_peak")
+    melatonin = zone_map.get("melatonin_window")
+
+    # ── Wake Zone nudges (0-90 min after waking) ──────────────────────
+    if wake_zone:
+        # 1. Light exposure — suppresses melatonin, resets SCN circadian clock
+        nudges.append(NudgeEvent(
+            minute=wake_zone.start_minute,
+            message="Get 10-15 min of bright natural light to clear sleep inertia and reset your circadian clock",
+            nudge_type="light_exposure",
+        ))
+
+        # 2. Morning hydration — rehydrate after 7-8h without water
+        nudges.append(NudgeEvent(
+            minute=wake_zone.start_minute + 10,
+            message="Drink a full glass of water — your body is dehydrated after sleep",
+            nudge_type="hydration",
+        ))
+
+        # 3. Morning stretch — activate muscles, boost blood flow
+        nudges.append(NudgeEvent(
+            minute=wake_zone.start_minute + 20,
+            message="Do 5 min of light stretching to activate your body and improve circulation",
+            nudge_type="exercise",
+        ))
+
+    # ── Morning Peak nudges (highest cognitive performance) ────────────
+    if morning_peak:
+        # 4. Deep work — schedule most demanding cognitive tasks during peak
+        nudges.append(NudgeEvent(
+            minute=morning_peak.start_minute,
+            message="Peak alertness window — schedule your most important deep work now",
+            nudge_type="deep_work",
+        ))
+
+        # 5. Morning exercise — exercise during peak boosts energy and mood
+        nudges.append(NudgeEvent(
+            minute=morning_peak.start_minute + 30,
+            message="Best time for exercise — physical activity now boosts alertness and mood for hours",
+            nudge_type="exercise",
+        ))
+
+        # 6. Strategic caffeine — pair with natural cortisol peak for max effect
+        nudges.append(NudgeEvent(
+            minute=morning_peak.start_minute + 60,
+            message="Ideal window for caffeine — pair with your natural cortisol peak for maximum effect",
+            nudge_type="caffeine",
+        ))
+
+    # ── Midday transition ──────────────────────────────────────────────
+    # 7. Caffeine cutoff — 10h before melatonin window (half-life ~5-6h)
+    if melatonin:
+        caffeine_cutoff = melatonin.start_minute - 600  # 10h before DLMO
+        if caffeine_cutoff > 0:
             nudges.append(NudgeEvent(
-                minute=zone.start_minute,
-                message="Get natural light exposure to clear sleep inertia",
-                nudge_type="light_exposure",
+                minute=caffeine_cutoff,
+                message="Caffeine cutoff — stop all caffeine now to protect tonight's sleep quality",
+                nudge_type="caffeine_cutoff",
             ))
-        elif zone.zone_type == "afternoon_dip":
+
+        # 8. Meal timing — finish heavy meals 3h before melatonin window
+        meal_cutoff = melatonin.start_minute - 180
+        if meal_cutoff > 0:
             nudges.append(NudgeEvent(
-                minute=zone.start_minute,
-                message="Consider a 20-minute nap to reduce sleep debt",
-                nudge_type="nap",
+                minute=meal_cutoff,
+                message="Finish any heavy meals now — digestion too close to bed disrupts sleep",
+                nudge_type="meal_timing",
             ))
-        elif zone.zone_type == "melatonin_window":
+
+        # 9. Hydration taper — reduce fluids 2h before bed to prevent awakenings
+        hydration_taper = melatonin.start_minute - 120
+        if hydration_taper > 0:
             nudges.append(NudgeEvent(
-                minute=zone.start_minute,
-                message="Reduce blue light exposure — melatonin production starting",
-                nudge_type="wind_down",
+                minute=hydration_taper,
+                message="Start tapering fluid intake to avoid nighttime bathroom trips",
+                nudge_type="hydration",
             ))
+
+    # ── Afternoon Dip nudges (natural energy low) ─────────────────────
+    if afternoon_dip:
+        # 10. Power nap — 20 min nap during dip reduces H(t) without grogginess
+        nudges.append(NudgeEvent(
+            minute=afternoon_dip.start_minute,
+            message="Energy dip detected — a 20-min power nap now can reduce sleep debt without grogginess",
+            nudge_type="nap",
+        ))
+
+        # 11. Passive tasks — switch to low-cognitive work during dip
+        nudges.append(NudgeEvent(
+            minute=afternoon_dip.start_minute + 15,
+            message="Low energy window — switch to routine tasks, emails, or light meetings",
+            nudge_type="task_suggestion",
+        ))
+
+        # 12. Light walk — gentle movement counteracts dip without draining energy
+        nudges.append(NudgeEvent(
+            minute=afternoon_dip.start_minute + 30,
+            message="A short walk outside can boost alertness during the afternoon dip",
+            nudge_type="exercise",
+        ))
+
+    # ── Evening Peak nudges (second energy rise) ──────────────────────
+    if evening_peak:
+        # 13. Last intense exercise window — exercise too late delays melatonin
+        nudges.append(NudgeEvent(
+            minute=evening_peak.start_minute,
+            message="Last window for moderate exercise — intense activity later will delay sleep",
+            nudge_type="exercise",
+        ))
+
+        # 14. Social/creative tasks — evening peak suits collaborative work
+        nudges.append(NudgeEvent(
+            minute=evening_peak.start_minute + 30,
+            message="Good window for social activities, creative work, or planning tomorrow",
+            nudge_type="task_suggestion",
+        ))
+
+    # ── Wind Down & Melatonin Window nudges ───────────────────────────
+    if melatonin:
+        # 15. Blue light reduction — blue light suppresses melatonin via SCN
+        nudges.append(NudgeEvent(
+            minute=melatonin.start_minute - 30,
+            message="Start reducing blue light — enable night mode, dim screens to protect melatonin",
+            nudge_type="blue_light",
+        ))
+
+        # 16. Wind down routine — signal body it's time to sleep
+        nudges.append(NudgeEvent(
+            minute=melatonin.start_minute,
+            message="Melatonin production starting — begin your wind down: light reading, breathing exercises, no screens",
+            nudge_type="wind_down",
+        ))
+
+    # Sort by minute to ensure chronological order
+    nudges.sort(key=lambda n: n.minute)
     return nudges

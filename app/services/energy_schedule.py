@@ -13,6 +13,7 @@ from app.cache.energy_cache import get_cached_energy, set_cached_energy
 from app.models.sleep_session import SleepSession
 from app.models.user import User
 from app.schemas.energy import EnergyScheduleResponse
+from app.services.exertion import compute_exertion_score, exertion_snop_adjustment
 
 
 async def get_user_energy_schedule(
@@ -27,9 +28,10 @@ async def get_user_energy_schedule(
     2. Fetch sleep history
     3. Compute sleep debt
     4. Estimate circadian phase
-    5. Compute Process S at wake
-    6. Run synthesis to get 24h energy curve
-    7. Cache result
+    5. Compute exertion-adjusted SNOP
+    6. Compute Process S at wake
+    7. Run synthesis to get 24h energy curve
+    8. Cache result
     """
     if date is None:
         date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -63,21 +65,25 @@ async def get_user_energy_schedule(
     wake_times = [s.end_time.hour + s.end_time.minute / 60.0 for s in sessions[-7:]]
     phi = estimate_phase_from_sleep_times(bedtimes, wake_times)
 
-    # 5. Compute Process S at wake (higher debt = higher starting H)
-    snop_mins = user.snop_hours * 60
-    h_at_wake = min(debt_mins / snop_mins, 1.0) if snop_mins > 0 else 0.0
+    # 5. Exertion-adjusted SNOP (high activity → more recovery sleep needed)
+    exertion = await compute_exertion_score(db, user_id)
+    snop_multiplier = exertion_snop_adjustment(exertion)
+    effective_snop_mins = user.snop_hours * 60 * snop_multiplier
 
-    # 6. Get today's wake time
+    # 6. Compute Process S at wake (higher debt = higher starting H)
+    h_at_wake = min(debt_mins / effective_snop_mins, 1.0) if effective_snop_mins > 0 else 0.0
+
+    # 7. Get today's wake time
     today_sessions = [s for s in sessions if s.start_time.date() == date.date()]
     if today_sessions:
         wake_time = max(s.end_time for s in today_sessions)
     else:
         wake_time = date.replace(hour=7, minute=0)  # default 7 AM
 
-    # 7. Run synthesis
+    # 8. Run synthesis
     schedule = compute_energy_schedule(wake_time, h_at_wake, phi)
 
-    # 8. Build response
+    # 9. Build response
     from app.schemas.energy import EnergyPoint, EnergyZone, NudgeEvent
 
     points = []
@@ -112,7 +118,7 @@ async def get_user_energy_schedule(
         is_cached=False,
     )
 
-    # 9. Cache
+    # 10. Cache
     await set_cached_energy(user_id, date, response)
 
     return response
