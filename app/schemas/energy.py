@@ -28,4 +28,5 @@ class EnergyScheduleResponse(BaseModel):
     energy_points: list[EnergyPoint]
     zones: list[EnergyZone]
     nudges: list[NudgeEvent]
+    energy_potential: float = 0.0  # 0-100, higher = more peak energy available
     is_cached: bool = False

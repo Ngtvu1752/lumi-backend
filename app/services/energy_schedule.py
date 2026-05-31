@@ -115,6 +115,7 @@ async def get_user_energy_schedule(
         energy_points=points,
         zones=zones,
         nudges=nudges,
+        energy_potential=schedule.energy_potential_score,
         is_cached=False,
     )
 

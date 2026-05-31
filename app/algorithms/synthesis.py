@@ -30,6 +30,7 @@ class EnergySchedule:
     zones: list[EnergyZone]
     nudges: list[NudgeEvent]
     wake_time: datetime
+    energy_potential_score: float  # 0-100, higher = more peak energy available
 
 
 def compute_energy_schedule(
@@ -69,11 +70,15 @@ def compute_energy_schedule(
     # Generate nudges
     nudges = _generate_nudges(zones, wake_time)
 
+    # Energy Potential Score: how much peak energy capacity remains
+    potential = _compute_energy_potential(h_at_wake)
+
     return EnergySchedule(
         energy_values=energy_normalized,
         zones=zones,
         nudges=nudges,
         wake_time=wake_time,
+        energy_potential_score=potential,
     )
 
 
@@ -83,6 +88,23 @@ def _normalize_energy(energy: np.ndarray) -> np.ndarray:
     if max_val - min_val == 0:
         return np.full_like(energy, 50.0)
     return (energy - min_val) / (max_val - min_val) * 100.0
+
+
+def _compute_energy_potential(h_at_wake: float) -> float:
+    """Compute Energy Potential Score (0-100).
+
+    From research.md §1.3: high sleep debt pushes H(t) baseline upward,
+    narrowing the gap between H(t) and C(k). This reduces peak amplitude
+    and deepens the afternoon dip — explaining chronic exhaustion.
+
+    Score = (1 - h_at_wake) * 100
+
+    Where h_at_wake = sleep_debt / SNOP (clamped to [0, 1]):
+    - 0 debt → h_at_wake=0 → score=100 (full potential)
+    - max debt → h_at_wake=1 → score=0 (no energy capacity left)
+    """
+    potential = (1.0 - h_at_wake) * 100.0
+    return float(np.clip(potential, 0.0, 100.0))
 
 
 def _classify_zones(
