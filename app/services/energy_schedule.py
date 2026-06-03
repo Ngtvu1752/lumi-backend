@@ -10,6 +10,7 @@ from app.algorithms.process_s import compute_process_s
 from app.algorithms.sleep_debt import compute_sleep_debt, format_sleep_debt
 from app.algorithms.synthesis import compute_energy_schedule
 from app.cache.energy_cache import get_cached_energy, set_cached_energy
+from app.models.habit import UserHabitPreference
 from app.models.sleep_session import SleepSession
 from app.models.user import User
 from app.schemas.energy import EnergyScheduleResponse
@@ -73,15 +74,32 @@ async def get_user_energy_schedule(
     # 6. Compute Process S at wake (higher debt = higher starting H)
     h_at_wake = min(debt_mins / effective_snop_mins, 1.0) if effective_snop_mins > 0 else 0.0
 
-    # 7. Get today's wake time
+    # 7. Fetch user's habit preferences
+    from app.services.habit_seed import HABITS
+    all_habit_ids = {h["habit_id"] for h in HABITS}
+
+    pref_stmt = select(UserHabitPreference).where(
+        UserHabitPreference.user_id == user_id,
+        UserHabitPreference.enabled == False,
+    )
+    pref_result = await db.execute(pref_stmt)
+    disabled_habits = {p.habit_id for p in pref_result.scalars().all()}
+    enabled_habit_ids = all_habit_ids - disabled_habits if disabled_habits else None
+
+    # 8. Get today's wake time
     today_sessions = [s for s in sessions if s.start_time.date() == date.date()]
     if today_sessions:
         wake_time = max(s.end_time for s in today_sessions)
     else:
         wake_time = date.replace(hour=7, minute=0)  # default 7 AM
 
-    # 8. Run synthesis
-    schedule = compute_energy_schedule(wake_time, h_at_wake, phi)
+    # 9. Run synthesis with adaptive nudge prioritization
+    schedule = compute_energy_schedule(
+        wake_time, h_at_wake, phi,
+        sleep_debt_mins=debt_mins,
+        snop_hours=user.snop_hours,
+        enabled_habit_ids=enabled_habit_ids,
+    )
 
     # 9. Build response
     from app.schemas.energy import EnergyPoint, EnergyZone, NudgeEvent
@@ -105,6 +123,7 @@ async def get_user_energy_schedule(
             time=wake_time + timedelta(minutes=n.minute),
             message=n.message,
             nudge_type=n.nudge_type,
+            priority=n.priority,
         )
         for n in schedule.nudges
     ]

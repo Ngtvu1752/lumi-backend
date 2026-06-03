@@ -22,6 +22,7 @@ class NudgeEvent:
     minute: int
     message: str
     nudge_type: str
+    priority: int = 3  # 1-5, 5 = highest priority
 
 
 @dataclass
@@ -37,6 +38,9 @@ def compute_energy_schedule(
     wake_time: datetime,
     h_at_wake: float,
     phi: float,
+    sleep_debt_mins: float = 0.0,
+    snop_hours: float = 8.0,
+    enabled_habit_ids: set[str] | None = None,
 ) -> EnergySchedule:
     """Compute 24-hour energy schedule from wake time.
 
@@ -46,6 +50,9 @@ def compute_energy_schedule(
         wake_time: datetime of user's wake up
         h_at_wake: Process S value at wake time
         phi: circadian phase
+        sleep_debt_mins: current cumulative sleep debt in minutes
+        snop_hours: user's personalized SNOP in hours
+        enabled_habit_ids: set of enabled habit IDs (None = all enabled)
 
     Returns:
         EnergySchedule with 1440 energy points, zones, and nudges
@@ -67,8 +74,8 @@ def compute_energy_schedule(
     # Classify zones — pass C(k) for dynamic melatonin window
     zones = _classify_zones(energy_normalized, t_hours, c)
 
-    # Generate nudges
-    nudges = _generate_nudges(zones, wake_time)
+    # Generate nudges with adaptive prioritization
+    nudges = _generate_nudges(zones, wake_time, sleep_debt_mins, snop_hours, enabled_habit_ids)
 
     # Energy Potential Score: how much peak energy capacity remains
     potential = _compute_energy_potential(h_at_wake)
@@ -207,13 +214,30 @@ def _find_peaks(data: np.ndarray) -> list[int]:
     return peaks
 
 
-def _generate_nudges(zones: list[EnergyZone], wake_time: datetime) -> list[NudgeEvent]:
+def _generate_nudges(
+    zones: list[EnergyZone],
+    wake_time: datetime,
+    sleep_debt_mins: float = 0.0,
+    snop_hours: float = 8.0,
+    enabled_habit_ids: set[str] | None = None,
+) -> list[NudgeEvent]:
     """Generate science-based nudge events mapped to circadian phases.
 
     16 nudges derived from sleep science research, each timed to the
     user's personalized energy zones rather than fixed clock times.
+    Nudges are adaptively prioritized based on sleep debt level and
+    filtered by user preferences.
+
+    Args:
+        zones: classified energy zones
+        wake_time: user's wake up time
+        sleep_debt_mins: current cumulative sleep debt in minutes
+        snop_hours: user's personalized SNOP in hours
+        enabled_habit_ids: set of enabled habit IDs (None = all enabled)
     """
-    nudges = []
+    from app.services.habit_adaptation import adapt_nudge_priorities
+
+    raw_nudges = []
 
     # Index zones by type for quick lookup
     zone_map = {z.zone_type: z for z in zones}
@@ -226,134 +250,62 @@ def _generate_nudges(zones: list[EnergyZone], wake_time: datetime) -> list[Nudge
 
     # ── Wake Zone nudges (0-90 min after waking) ──────────────────────
     if wake_zone:
-        # 1. Light exposure — suppresses melatonin, resets SCN circadian clock
-        nudges.append(NudgeEvent(
-            minute=wake_zone.start_minute,
-            message="Get 10-15 min of bright natural light to clear sleep inertia and reset your circadian clock",
-            nudge_type="light_exposure",
-        ))
-
-        # 2. Morning hydration — rehydrate after 7-8h without water
-        nudges.append(NudgeEvent(
-            minute=wake_zone.start_minute + 10,
-            message="Drink a full glass of water — your body is dehydrated after sleep",
-            nudge_type="hydration",
-        ))
-
-        # 3. Morning stretch — activate muscles, boost blood flow
-        nudges.append(NudgeEvent(
-            minute=wake_zone.start_minute + 20,
-            message="Do 5 min of light stretching to activate your body and improve circulation",
-            nudge_type="exercise",
-        ))
+        raw_nudges.append({"minute": wake_zone.start_minute, "message": "Get 10-15 min of bright natural light to clear sleep inertia and reset your circadian clock", "nudge_type": "light_exposure"})
+        raw_nudges.append({"minute": wake_zone.start_minute + 10, "message": "Drink a full glass of water — your body is dehydrated after sleep", "nudge_type": "morning_hydration"})
+        raw_nudges.append({"minute": wake_zone.start_minute + 20, "message": "Do 5 min of light stretching to activate your body and improve circulation", "nudge_type": "morning_stretch"})
 
     # ── Morning Peak nudges (highest cognitive performance) ────────────
     if morning_peak:
-        # 4. Deep work — schedule most demanding cognitive tasks during peak
-        nudges.append(NudgeEvent(
-            minute=morning_peak.start_minute,
-            message="Peak alertness window — schedule your most important deep work now",
-            nudge_type="deep_work",
-        ))
-
-        # 5. Morning exercise — exercise during peak boosts energy and mood
-        nudges.append(NudgeEvent(
-            minute=morning_peak.start_minute + 30,
-            message="Best time for exercise — physical activity now boosts alertness and mood for hours",
-            nudge_type="exercise",
-        ))
-
-        # 6. Strategic caffeine — pair with natural cortisol peak for max effect
-        nudges.append(NudgeEvent(
-            minute=morning_peak.start_minute + 60,
-            message="Ideal window for caffeine — pair with your natural cortisol peak for maximum effect",
-            nudge_type="caffeine",
-        ))
+        raw_nudges.append({"minute": morning_peak.start_minute, "message": "Peak alertness window — schedule your most important deep work now", "nudge_type": "deep_work"})
+        raw_nudges.append({"minute": morning_peak.start_minute + 30, "message": "Best time for exercise — physical activity now boosts alertness and mood for hours", "nudge_type": "morning_exercise"})
+        raw_nudges.append({"minute": morning_peak.start_minute + 60, "message": "Ideal window for caffeine — pair with your natural cortisol peak for maximum effect", "nudge_type": "strategic_caffeine"})
 
     # ── Midday transition ──────────────────────────────────────────────
-    # 7. Caffeine cutoff — 10h before melatonin window (half-life ~5-6h)
     if melatonin:
-        caffeine_cutoff = melatonin.start_minute - 600  # 10h before DLMO
+        caffeine_cutoff = melatonin.start_minute - 600
         if caffeine_cutoff > 0:
-            nudges.append(NudgeEvent(
-                minute=caffeine_cutoff,
-                message="Caffeine cutoff — stop all caffeine now to protect tonight's sleep quality",
-                nudge_type="caffeine_cutoff",
-            ))
+            raw_nudges.append({"minute": caffeine_cutoff, "message": "Caffeine cutoff — stop all caffeine now to protect tonight's sleep quality", "nudge_type": "caffeine_cutoff"})
 
-        # 8. Meal timing — finish heavy meals 3h before melatonin window
         meal_cutoff = melatonin.start_minute - 180
         if meal_cutoff > 0:
-            nudges.append(NudgeEvent(
-                minute=meal_cutoff,
-                message="Finish any heavy meals now — digestion too close to bed disrupts sleep",
-                nudge_type="meal_timing",
-            ))
+            raw_nudges.append({"minute": meal_cutoff, "message": "Finish any heavy meals now — digestion too close to bed disrupts sleep", "nudge_type": "meal_timing"})
 
-        # 9. Hydration taper — reduce fluids 2h before bed to prevent awakenings
         hydration_taper = melatonin.start_minute - 120
         if hydration_taper > 0:
-            nudges.append(NudgeEvent(
-                minute=hydration_taper,
-                message="Start tapering fluid intake to avoid nighttime bathroom trips",
-                nudge_type="hydration",
-            ))
+            raw_nudges.append({"minute": hydration_taper, "message": "Start tapering fluid intake to avoid nighttime bathroom trips", "nudge_type": "hydration_taper"})
 
     # ── Afternoon Dip nudges (natural energy low) ─────────────────────
     if afternoon_dip:
-        # 10. Power nap — 20 min nap during dip reduces H(t) without grogginess
-        nudges.append(NudgeEvent(
-            minute=afternoon_dip.start_minute,
-            message="Energy dip detected — a 20-min power nap now can reduce sleep debt without grogginess",
-            nudge_type="nap",
-        ))
-
-        # 11. Passive tasks — switch to low-cognitive work during dip
-        nudges.append(NudgeEvent(
-            minute=afternoon_dip.start_minute + 15,
-            message="Low energy window — switch to routine tasks, emails, or light meetings",
-            nudge_type="task_suggestion",
-        ))
-
-        # 12. Light walk — gentle movement counteracts dip without draining energy
-        nudges.append(NudgeEvent(
-            minute=afternoon_dip.start_minute + 30,
-            message="A short walk outside can boost alertness during the afternoon dip",
-            nudge_type="exercise",
-        ))
+        raw_nudges.append({"minute": afternoon_dip.start_minute, "message": "Energy dip detected — a 20-min power nap now can reduce sleep debt without grogginess", "nudge_type": "power_nap"})
+        raw_nudges.append({"minute": afternoon_dip.start_minute + 15, "message": "Low energy window — switch to routine tasks, emails, or light meetings", "nudge_type": "passive_tasks"})
+        raw_nudges.append({"minute": afternoon_dip.start_minute + 30, "message": "A short walk outside can boost alertness during the afternoon dip", "nudge_type": "afternoon_walk"})
 
     # ── Evening Peak nudges (second energy rise) ──────────────────────
     if evening_peak:
-        # 13. Last intense exercise window — exercise too late delays melatonin
-        nudges.append(NudgeEvent(
-            minute=evening_peak.start_minute,
-            message="Last window for moderate exercise — intense activity later will delay sleep",
-            nudge_type="exercise",
-        ))
-
-        # 14. Social/creative tasks — evening peak suits collaborative work
-        nudges.append(NudgeEvent(
-            minute=evening_peak.start_minute + 30,
-            message="Good window for social activities, creative work, or planning tomorrow",
-            nudge_type="task_suggestion",
-        ))
+        raw_nudges.append({"minute": evening_peak.start_minute, "message": "Last window for moderate exercise — intense activity later will delay sleep", "nudge_type": "evening_exercise"})
+        raw_nudges.append({"minute": evening_peak.start_minute + 30, "message": "Good window for social activities, creative work, or planning tomorrow", "nudge_type": "social_creative"})
 
     # ── Wind Down & Melatonin Window nudges ───────────────────────────
     if melatonin:
-        # 15. Blue light reduction — blue light suppresses melatonin via SCN
-        nudges.append(NudgeEvent(
-            minute=melatonin.start_minute - 30,
-            message="Start reducing blue light — enable night mode, dim screens to protect melatonin",
-            nudge_type="blue_light",
-        ))
+        raw_nudges.append({"minute": melatonin.start_minute - 30, "message": "Start reducing blue light — enable night mode, dim screens to protect melatonin", "nudge_type": "blue_light"})
+        raw_nudges.append({"minute": melatonin.start_minute, "message": "Melatonin production starting — begin your wind down: light reading, breathing exercises, no screens", "nudge_type": "wind_down"})
 
-        # 16. Wind down routine — signal body it's time to sleep
-        nudges.append(NudgeEvent(
-            minute=melatonin.start_minute,
-            message="Melatonin production starting — begin your wind down: light reading, breathing exercises, no screens",
-            nudge_type="wind_down",
-        ))
+    # Adapt priorities based on sleep debt
+    prioritized = adapt_nudge_priorities(raw_nudges, sleep_debt_mins, snop_hours)
 
-    # Sort by minute to ensure chronological order
-    nudges.sort(key=lambda n: n.minute)
+    # Filter by user preferences
+    if enabled_habit_ids is not None:
+        prioritized = [n for n in prioritized if n["nudge_type"] in enabled_habit_ids]
+
+    # Convert to NudgeEvent objects
+    nudges = [
+        NudgeEvent(
+            minute=n["minute"],
+            message=n["message"],
+            nudge_type=n["nudge_type"],
+            priority=n["priority"],
+        )
+        for n in prioritized
+    ]
+
     return nudges

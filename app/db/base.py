@@ -3,5 +3,17 @@ from app.models.user import User
 from app.models.sleep_session import SleepSession
 from app.models.biometric import BiometricData
 from app.models.survey import UserSurveyResponse
+from app.models.habit import Habit, UserHabitPreference, HabitLog
+from app.models.device import DeviceToken
 
-__all__ = ["Base", "User", "SleepSession", "BiometricData", "UserSurveyResponse"]
+__all__ = [
+    "Base",
+    "User",
+    "SleepSession",
+    "BiometricData",
+    "UserSurveyResponse",
+    "Habit",
+    "UserHabitPreference",
+    "HabitLog",
+    "DeviceToken",
+]

@@ -18,8 +18,10 @@ class EnergyZone(BaseModel):
 class NudgeEvent(BaseModel):
     time: datetime
     message: str
-    nudge_type: str  # light_exposure, hydration, exercise, deep_work, caffeine, caffeine_cutoff,
-    # meal_timing, nap, task_suggestion, blue_light, wind_down
+    nudge_type: str  # light_exposure, morning_hydration, morning_stretch, deep_work, morning_exercise,
+    # strategic_caffeine, caffeine_cutoff, meal_timing, hydration_taper, power_nap,
+    # passive_tasks, afternoon_walk, evening_exercise, social_creative, blue_light, wind_down
+    priority: int = 3  # 1-5, 5 = highest priority (adapted based on sleep debt)
 
 
 class EnergyScheduleResponse(BaseModel):

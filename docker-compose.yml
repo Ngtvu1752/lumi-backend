@@ -61,6 +61,7 @@ services:
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     volumes:
       - ./app:/app/app
+      - ./config:/app/config:ro
 
   # ============================================
   # Celery Worker — Storage (INSERT into hypertables)
@@ -81,6 +82,7 @@ services:
     command: celery -A app.tasks.worker worker --loglevel=info --queues=storage --concurrency=4
     volumes:
       - ./app:/app/app
+      - ./config:/app/config:ro
 
   # ============================================
   # Celery Worker — Analytics (algorithm pipeline)
@@ -101,6 +103,7 @@ services:
     command: celery -A app.tasks.worker worker --loglevel=info --queues=analytics --concurrency=2
     volumes:
       - ./app:/app/app
+      - ./config:/app/config:ro
 
 volumes:
   timescaledb_data:

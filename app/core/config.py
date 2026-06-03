@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     HARMONIC_AMPLITUDES: list[float] = [0.97, 0.22, 0.07, 0.03, 0.001]
     CIRCADIAN_PERIOD: float = 24.2  # Natural circadian period (hours)
 
+    # Firebase Cloud Messaging
+    FCM_CREDENTIALS_PATH: str = ""  # Path to Firebase service account JSON
+
     class Config:
         env_file = ".env"
 
