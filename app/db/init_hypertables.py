@@ -10,6 +10,7 @@ from app.db.session import engine, Base
 from app.db.base import (
     User, SleepSession, BiometricData, UserSurveyResponse,
     Habit, UserHabitPreference, HabitLog, DeviceToken,
+    SoundTrack, UserSoundFavorite, SoundPlaybackLog,
 )
 
 

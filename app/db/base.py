@@ -5,6 +5,7 @@ from app.models.biometric import BiometricData
 from app.models.survey import UserSurveyResponse
 from app.models.habit import Habit, UserHabitPreference, HabitLog
 from app.models.device import DeviceToken
+from app.models.sound import SoundTrack, UserSoundFavorite, SoundPlaybackLog
 
 __all__ = [
     "Base",
@@ -16,4 +17,7 @@ __all__ = [
     "UserHabitPreference",
     "HabitLog",
     "DeviceToken",
+    "SoundTrack",
+    "UserSoundFavorite",
+    "SoundPlaybackLog",
 ]
