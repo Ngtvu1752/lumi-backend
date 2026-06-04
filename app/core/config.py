@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     # Firebase Cloud Messaging
     FCM_CREDENTIALS_PATH: str = ""  # Path to Firebase service account JSON
 
+    # AWS S3 Configuration
+    AWS_ACCESS_KEY_ID: str | None = None
+    AWS_SECRET_ACCESS_KEY: str | None = None
+    AWS_REGION: str = "us-east-1"
+    S3_SOUNDS_BUCKET: str = "user-private-dataset"
+    SOUNDS_S3_PREFIX: str = "lumi-sounds"
+
     class Config:
         env_file = ".env"
 

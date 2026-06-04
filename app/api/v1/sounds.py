@@ -18,6 +18,7 @@ from app.schemas.sound import (
     SoundTrackResponse,
 )
 from app.services.sound_seed import seed_sounds
+from app.services.s3_storage import generate_presigned_url
 
 router = APIRouter(prefix="/sounds", tags=["sounds"])
 
@@ -54,8 +55,8 @@ async def list_sounds(
             description=s.description,
             category=s.category,
             duration_seconds=s.duration_seconds,
-            file_url=s.file_url,
-            thumbnail_url=s.thumbnail_url,
+            file_url=generate_presigned_url(s.file_url),
+            thumbnail_url=generate_presigned_url(s.thumbnail_url),
             is_favorite=s.sound_id in favorite_ids,
         )
         for s in sounds
@@ -87,8 +88,8 @@ async def list_categories(
                 description=s.description,
                 category=s.category,
                 duration_seconds=s.duration_seconds,
-                file_url=s.file_url,
-                thumbnail_url=s.thumbnail_url,
+                file_url=generate_presigned_url(s.file_url),
+                thumbnail_url=generate_presigned_url(s.thumbnail_url),
                 is_favorite=s.sound_id in favorite_ids,
             )
         )
@@ -124,8 +125,8 @@ async def list_favorites(
             description=s.description,
             category=s.category,
             duration_seconds=s.duration_seconds,
-            file_url=s.file_url,
-            thumbnail_url=s.thumbnail_url,
+            file_url=generate_presigned_url(s.file_url),
+            thumbnail_url=generate_presigned_url(s.thumbnail_url),
             is_favorite=True,
         )
         for s in sounds
